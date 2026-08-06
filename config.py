@@ -28,22 +28,27 @@ DEFAULT_CALLBACK_URL = "https://127.0.0.1"
 TOKEN_DIR = Path.home() / ".schwab"
 TOKEN_PATH = TOKEN_DIR / "token.json"
 
-def is_market_open() -> bool:
-    """Checks if US Stock Market (NYSE/NASDAQ) is currently open for regular trading hours (Mon-Fri 9:30 AM - 4:00 PM ET)."""
+def is_market_open() -> tuple[bool, str]:
+    """
+    Checks if US Stock Market is open for regular trading hours (9:30 AM - 4:00 PM ET).
+    Returns (is_open_for_trading, status_reason).
+    """
     from datetime import datetime
     import zoneinfo
 
     et_tz = zoneinfo.ZoneInfo("America/New_York")
     now_et = datetime.now(et_tz)
 
-    # Mon = 0, Sun = 6
     if now_et.weekday() >= 5:
-        return False
+        return (False, "Market is CLOSED (Weekend)")
 
-    market_open = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    trading_start = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
     market_close = now_et.replace(hour=16, minute=0, second=0, microsecond=0)
 
-    return market_open <= now_et <= market_close
+    if trading_start <= now_et <= market_close:
+        return (True, "Market is OPEN for continuous trading")
+    else:
+        return (False, "Market is CLOSED (Outside 9:30 AM - 4:00 PM ET)")
 
 def check_us_vpn() -> tuple[bool, str]:
     """Verifies that the current public IP address is located in the US (VPN protection)."""

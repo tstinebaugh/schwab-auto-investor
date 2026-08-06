@@ -49,7 +49,7 @@ def check_vpn_guardrail(args):
         print(f"[SECURITY OK] VPN location verified: {loc_info}")
 
 def handle_status(args):
-    """Display current portfolio status and cash balance."""
+    """Display detailed account balances, target portfolio holdings, and general account assets."""
     check_vpn_guardrail(args)
 
     if not keychain_manager.has_credentials():
@@ -59,23 +59,27 @@ def handle_status(args):
     client = get_schwab_client()
     trader = SchwabTrader(client)
 
-    api_cash, current_positions = trader.get_account_summary()
-    cash_available = Decimal(str(args.cash)) if args.cash is not None else api_cash
-    total_positions_val = sum(current_positions.values())
-    total_portfolio_val = total_positions_val + cash_available
+    summary = trader.get_account_summary()
+    settled_cash = summary["settled_cash"]
+    ledger_cash = summary["ledger_cash"]
+    buying_power = summary["buying_power"]
+    liq_val = summary["liquidation_value"]
+    target_positions = summary["target_holdings"]
+    all_positions = summary["all_holdings"]
 
-    print("\n=== SCHWAB PORTFOLIO SUMMARY ===")
-    if args.cash is not None:
-        print(f"Available Cash (User Override): ${cash_available:,.2f}  (API Ledger: ${api_cash:,.2f})")
-    else:
-        print(f"Available Cash (API Ledger):   ${cash_available:,.2f}")
-    print(f"Total Target ETFs:             ${total_positions_val:,.2f}")
-    print(f"Total Account Value:           ${total_portfolio_val:,.2f}\n")
+    total_target_val = sum(target_positions.values())
 
+    print("\n=== SCHWAB ACCOUNT BALANCES ===")
+    print(f"Settled Cash (Available for API Trading): ${settled_cash:,.2f}")
+    print(f"Ledger Cash Balance (cashBalance):        ${ledger_cash:,.2f}")
+    print(f"Margin Buying Power:                     ${buying_power:,.2f}")
+    print(f"Total Account Liquidation Value:         ${liq_val:,.2f}\n")
+
+    print("=== TARGET PORTFOLIO HOLDINGS ===")
     table_data = []
     for ticker, weight in config.TARGET_PORTFOLIO.items():
-        curr_val = current_positions.get(ticker, Decimal("0.00"))
-        curr_pct = (curr_val / total_positions_val * 100) if total_positions_val > 0 else Decimal("0.0")
+        curr_val = target_positions.get(ticker, Decimal("0.00"))
+        curr_pct = (curr_val / total_target_val * 100) if total_target_val > 0 else Decimal("0.0")
         target_pct = weight * 100
         table_data.append([
             ticker,
@@ -85,6 +89,12 @@ def handle_status(args):
         ])
 
     print(tabulate(table_data, headers=["Ticker", "Current Value", "Current %", "Target %"], tablefmt="grid"))
+
+    other_positions = {k: v for k, v in all_positions.items() if k not in config.TARGET_PORTFOLIO}
+    if other_positions:
+        print("\n=== OTHER ACCOUNT HOLDINGS ===")
+        other_table = [[k, f"${v:,.2f}"] for k, v in other_positions.items()]
+        print(tabulate(other_table, headers=["Ticker", "Market Value"], tablefmt="grid"))
 
 def handle_rebalance(args):
     """Perform buy-only portfolio rebalancing and execute orders."""
@@ -97,16 +107,17 @@ def handle_rebalance(args):
     client = get_schwab_client()
     trader = SchwabTrader(client)
 
-    api_cash, current_positions = trader.get_account_summary()
-    cash_available = Decimal(str(args.cash)) if args.cash is not None else api_cash
-    
-    if args.cash is not None:
-        print(f"\n[INFO] Cash Available for Trading (User Override): ${cash_available:,.2f}  (API Ledger: ${api_cash:,.2f})")
-    else:
-        print(f"\n[INFO] Cash Available for Trading (API Ledger): ${cash_available:,.2f}")
+    summary = trader.get_account_summary()
+    cash_available = summary["settled_cash"]
+    ledger_cash = summary["ledger_cash"]
+    current_positions = summary["target_holdings"]
+
+    print(f"\n[INFO] Settled Cash Available for Trading: ${cash_available:,.2f}  (Ledger cashBalance: ${ledger_cash:,.2f})")
 
     if cash_available < config.MIN_CASH_THRESHOLD:
-        print(f"[SKIP] Available cash (${cash_available:,.2f}) is below minimum threshold (${config.MIN_CASH_THRESHOLD:,.2f}). No trades executed.")
+        print(f"[SKIP] Settled available cash (${cash_available:,.2f}) is below minimum threshold (${config.MIN_CASH_THRESHOLD:,.2f}).")
+        if ledger_cash > Decimal("0.00"):
+            print(f"       💡 Note: Your ledger cashBalance is ${ledger_cash:,.2f}, but funds are still clearing/settling on Schwab's API backend.")
         return
 
     # Calculate buy-only rebalance allocation
@@ -117,26 +128,68 @@ def handle_rebalance(args):
     symbols = list(config.TARGET_PORTFOLIO.keys())
     quotes = trader.get_quotes(symbols)
 
+    # 1. Base whole share calculations
+    shares_map = {}
+    base_cost = Decimal("0.00")
+    for ticker, plan in rebalance_plan.items():
+        price = quotes.get(ticker, Decimal("0"))
+        allocated = plan["allocated_cash"]
+        s = int(allocated // price) if price > 0 else 0
+        shares_map[ticker] = s
+        base_cost += Decimal(str(s)) * price
+
+    # 2. Residual Cash Optimizer: Sweep unspent cash into most underweight affordable ETFs
+    remaining_cash = cash_available - base_cost
+    total_post_capital = sum(current_positions.get(t, Decimal("0")) for t in config.TARGET_PORTFOLIO) + cash_available
+
+    while True:
+        affordable_tickers = [t for t in config.TARGET_PORTFOLIO if quotes.get(t, Decimal("0")) > 0 and quotes[t] <= remaining_cash]
+        if not affordable_tickers:
+            break
+
+        # Calculate current projected values with allocated shares
+        projected_values = {
+            t: current_positions.get(t, Decimal("0")) + (Decimal(str(shares_map[t])) * quotes[t])
+            for t in config.TARGET_PORTFOLIO
+        }
+        proj_total = sum(projected_values.values())
+
+        # Select ticker with largest weight shortfall (Target % - Current %)
+        best_ticker = None
+        max_shortfall = Decimal("-999999")
+
+        for t in affordable_tickers:
+            curr_w = (projected_values[t] / proj_total) if proj_total > 0 else Decimal("0")
+            shortfall = config.TARGET_PORTFOLIO[t] - curr_w
+            if shortfall > max_shortfall:
+                max_shortfall = shortfall
+                best_ticker = t
+
+        if best_ticker is None:
+            break
+
+        shares_map[best_ticker] += 1
+        remaining_cash -= quotes[best_ticker]
+
     table_data = []
     total_alloc = Decimal("0.00")
     order_details = {}
+    final_portfolio_val = sum(current_positions.get(t, Decimal("0")) + (Decimal(str(shares_map[t])) * quotes.get(t, Decimal("0"))) for t in config.TARGET_PORTFOLIO)
 
     for ticker, plan in rebalance_plan.items():
         allocated = plan["allocated_cash"]
-        total_alloc += allocated
+        price = quotes.get(ticker, Decimal("0"))
+        shares = shares_map[ticker]
+        est_cost = Decimal(str(shares)) * price
+        total_alloc += est_cost
+
         curr_pct = f"{plan['current_weight']*100:.1f}%"
         target_pct = f"{plan['target_weight']*100:.1f}%"
-        post_pct = f"{plan['post_weight']*100:.1f}%"
         
-        price = quotes.get(ticker, Decimal("0"))
-        if price > 0:
-            shares = int(allocated // price)
-        else:
-            shares = 0
-            
-        est_cost = Decimal(str(shares)) * price
+        post_val = current_positions.get(ticker, Decimal("0")) + est_cost
+        post_pct = f"{(post_val / final_portfolio_val * 100):.1f}%" if final_portfolio_val > 0 else "0.0%"
+        
         cap_pct = Decimal(str(args.price_cap_pct / 100.0))
-        # Use price as base for limit cap (quantized to 2 decimal places)
         limit_price = (price * (Decimal("1.0") + cap_pct)).quantize(Decimal("0.01")) if price > 0 else Decimal("0")
 
         order_details[ticker] = {
@@ -166,10 +219,10 @@ def handle_rebalance(args):
     print(tabulate(table_data, headers=headers, tablefmt="grid"))
     print(f"Total Capital to Deploy: ${total_alloc:,.2f}\n")
 
-    market_open = config.is_market_open()
+    market_open, market_reason = config.is_market_open()
     if not market_open and not args.gtc_limit:
-        print("⚠️ [WARNING] Regular US Stock Market hours are currently CLOSED (9:30 AM - 4:00 PM Eastern Time).")
-        print("   Day Market orders placed outside regular trading hours are immediately canceled by Schwab.")
+        print(f"⚠️ [WARNING] {market_reason}.")
+        print("   Day Market orders placed outside regular trading hours (9:35 AM - 4:00 PM ET) are canceled by Schwab.")
         print("   💡 TIP: Add '--gtc-limit' to queue GTC Limit orders (+5% price cap) that automatically fill on the next business day!")
 
     if args.dry_run:
@@ -177,7 +230,7 @@ def handle_rebalance(args):
         return
 
     if not market_open and not args.gtc_limit:
-        print("\n[NOTICE] Please run this command during regular market hours (9:30 AM - 4:00 PM ET) OR add '--gtc-limit' to queue GTC orders.")
+        print(f"\n[NOTICE] {market_reason}. Please run during continuous trading (9:35 AM - 4:00 PM ET) OR add '--gtc-limit'.")
         return
 
     order_type_desc = f"GTC LIMIT (Max Cap: +{args.price_cap_pct}%)" if args.gtc_limit else "MARKET BUY"
@@ -186,6 +239,7 @@ def handle_rebalance(args):
         print("[CANCELLED] Rebalancing cancelled by user.")
         return
 
+    import time
     print("\nExecuting orders on Schwab...")
     orders_placed = 0
     for ticker, details in order_details.items():
@@ -208,6 +262,9 @@ def handle_rebalance(args):
         except Exception as e:
             print(f"  [ERROR] Failed to place order for {ticker}: {e}")
 
+        # 1.0s pause to strictly satisfy Schwab's 1-order-per-second API burst governor
+        time.sleep(1.0)
+
     print(f"\n[COMPLETE] Successfully executed {orders_placed} order(s).")
 
 def main():
@@ -222,13 +279,11 @@ def main():
 
     # status
     parser_status = subparsers.add_parser("status", help="Check portfolio holdings and available cash")
-    parser_status.add_argument("--cash", type=float, default=None, help="Override available cash amount")
     parser_status.add_argument("--bypass-vpn", action="store_true", help="Bypass default US VPN location security check")
 
     # rebalance
     parser_rebalance = subparsers.add_parser("rebalance", help="Run buy-only rebalancer")
     parser_rebalance.add_argument("--dry-run", action="store_true", help="Simulate rebalance without placing orders")
-    parser_rebalance.add_argument("--cash", type=float, default=None, help="Override available cash amount")
     parser_rebalance.add_argument("--gtc-limit", action="store_true", help="Place GTC (Good Till Cancel) Limit orders with price cap protection")
     parser_rebalance.add_argument("--price-cap-pct", type=float, default=5.0, help="Price cap percentage limit above current quote price (Default: 5.0%%)")
     parser_rebalance.add_argument("--bypass-vpn", action="store_true", help="Bypass default US VPN location security check")

@@ -52,27 +52,54 @@ class SchwabTrader:
         account_data = resp.json()
         sec_account = account_data.get("securitiesAccount", {})
         
-        # Cash available for trading (handles both CASH and MARGIN account schemas)
-        balances = sec_account.get("currentBalances", {})
-        cash_raw = (
-            balances.get("cashAvailableForTrading")
-            if balances.get("cashAvailableForTrading") is not None
-            else balances.get("cashBalance", 0)
-        )
-        cash_available = Decimal(str(cash_raw))
+        current_balances = sec_account.get("currentBalances", {})
+        initial_balances = sec_account.get("initialBalances", {})
 
-        # Current ETF positions
+        # Prefer cashAvailableForTrading or cashSettledFunds over raw ledger cashBalance
+        cash_avail_raw = (
+            current_balances.get("cashAvailableForTrading")
+            if current_balances.get("cashAvailableForTrading") is not None
+            else (
+                current_balances.get("cashSettledFunds")
+                if current_balances.get("cashSettledFunds") is not None
+                else (
+                    initial_balances.get("cashAvailableForTrading")
+                    if initial_balances.get("cashAvailableForTrading") is not None
+                    else current_balances.get("cashBalance", 0.0)
+                )
+            )
+        )
+        settled_cash = Decimal(str(cash_avail_raw if cash_avail_raw is not None else 0.0))
+        ledger_cash = Decimal(str(current_balances.get("cashBalance", 0.0)))
+        buying_power = Decimal(str(current_balances.get("buyingPower", 0.0)))
+        liquidation_value = Decimal(str(current_balances.get("liquidationValue", 0.0)))
+
+        # ETF positions (separate target portfolio vs non-target portfolio)
         positions = sec_account.get("positions", [])
-        current_holdings: Dict[str, Decimal] = {t: Decimal("0.00") for t in config.TARGET_PORTFOLIO}
+        target_holdings: Dict[str, Decimal] = {t: Decimal("0.00") for t in config.TARGET_PORTFOLIO}
+        all_holdings: Dict[str, Decimal] = {}
 
         for pos in positions:
             instrument = pos.get("instrument", {})
             symbol = instrument.get("symbol")
-            if symbol in current_holdings:
-                market_val = Decimal(str(pos.get("marketValue", 0)))
-                current_holdings[symbol] = market_val
+            qty = Decimal(str(pos.get("longQuantity", 0)))
+            mkt_val = Decimal(str(pos.get("marketValue", 0)))
 
-        return cash_available, current_holdings
+            if symbol:
+                all_holdings[symbol] = mkt_val
+                if symbol in target_holdings:
+                    target_holdings[symbol] = mkt_val
+
+        summary = {
+            "settled_cash": settled_cash,
+            "ledger_cash": ledger_cash,
+            "buying_power": buying_power,
+            "liquidation_value": liquidation_value,
+            "target_holdings": target_holdings,
+            "all_holdings": all_holdings
+        }
+
+        return summary
 
     def get_quotes(self, symbols: List[str]) -> Dict[str, Decimal]:
         """Fetches current ask/last/close price for given ticker symbols."""
@@ -97,17 +124,30 @@ class SchwabTrader:
         return schwab.orders.equities.equity_buy_market(ticker, shares).build()
 
     def build_limit_order_spec(self, ticker: str, shares: float, limit_price: Decimal, gtc: bool = True) -> dict:
-        """Builds equity limit buy order spec with GTC duration, SEAMLESS session, and price cap protection."""
-        builder = schwab.orders.equities.equity_buy_limit(ticker, shares, str(limit_price.quantize(Decimal("0.01"))))
+        """Builds equity limit buy order spec with GTC duration, NORMAL session for GTC, and price cap protection."""
+        price_dec = Decimal(str(limit_price)).quantize(Decimal("0.01"))
+        builder = schwab.orders.equities.equity_buy_limit(ticker, shares, str(price_dec))
         if gtc:
             builder.set_duration(schwab.orders.common.Duration.GOOD_TILL_CANCEL)
-        builder.set_session(schwab.orders.common.Session.SEAMLESS)
+            # Schwab requires NORMAL session for GOOD_TILL_CANCEL orders; SEAMLESS session is rejected with GTC
+            builder.set_session(schwab.orders.common.Session.NORMAL)
+        else:
+            builder.set_session(schwab.orders.common.Session.SEAMLESS)
         return builder.build()
 
     def place_order(self, order_spec: dict) -> bool:
-        """Submits order to Schwab API."""
+        """Submits order to Schwab API and provides detailed error messages if rejected."""
         resp = self.client.place_order(self.account_hash, order_spec)
         if resp.status_code in (200, 201):
             return True
         else:
-            raise RuntimeError(f"Order placement failed (Status {resp.status_code}): {resp.text}")
+            error_details = resp.text
+            try:
+                err_json = resp.json()
+                if isinstance(err_json, dict):
+                    msg = err_json.get("message") or err_json.get("errorDetails") or err_json.get("errors")
+                    if msg:
+                        error_details = f"{msg} (Raw: {resp.text})"
+            except Exception:
+                pass
+            raise RuntimeError(f"Order placement failed (Status {resp.status_code}): {error_details}")
