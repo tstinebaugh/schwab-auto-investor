@@ -70,12 +70,18 @@ security add-generic-password -a "$USER" -s "schwab_investor_callback_url" -w "h
    .venv/bin/python main.py status
    ```
 
-4. **Run Rebalance Simulation (Dry-Run)**:
+4. **Re-Authenticate / Refresh Schwab OAuth Token**:
+   ```bash
+   .venv/bin/python main.py auth
+   ```
+   *Note: If the script encounters an authentication error or an expired token during any operation (`status`, `rebalance`), it will automatically prompt you to re-authenticate.*
+
+5. **Run Rebalance Simulation (Dry-Run)**:
    ```bash
    .venv/bin/python main.py rebalance --dry-run
    ```
 
-5. **Execute Live Monthly Investment**:
+6. **Execute Live Monthly Investment**:
    - *During regular market hours (9:30 AM - 4:00 PM ET)*:
      ```bash
      .venv/bin/python main.py rebalance

@@ -3,6 +3,8 @@ from typing import Dict, Tuple, List, Optional
 import schwab
 import keychain_manager
 import config
+from auth_manager import get_schwab_client, is_auth_error
+
 
 class SchwabTrader:
     def __init__(self, client: schwab.client.Client, account_hash: Optional[str] = None):
@@ -12,9 +14,32 @@ class SchwabTrader:
         if not self.account_hash:
             self.account_hash = self._fetch_and_save_account_hash()
 
+    def _call_api(self, method_name: str, *args, **kwargs):
+        """
+        Executes a Schwab client API method with automatic retry and re-authentication 
+        if an auth or token refresh error occurs.
+        """
+        try:
+            method = getattr(self.client, method_name)
+            resp = method(*args, **kwargs)
+            if hasattr(resp, "status_code") and resp.status_code in (401, 403):
+                raise RuntimeError(f"Schwab API returned HTTP status {resp.status_code} (Authentication Required)")
+            return resp
+        except Exception as e:
+            if is_auth_error(e):
+                print(f"\n[AUTH ERROR] Schwab authentication failure or token expired ({e}).")
+                print("Initiating automatic re-authentication flow...\n")
+                self.client = get_schwab_client(force_reauth=True)
+                method = getattr(self.client, method_name)
+                resp = method(*args, **kwargs)
+                if hasattr(resp, "status_code") and resp.status_code in (401, 403):
+                    raise RuntimeError(f"Schwab API returned HTTP status {resp.status_code} after re-authentication.")
+                return resp
+            raise
+
     def _fetch_and_save_account_hash(self) -> str:
         """Fetches account hashes from Schwab API and saves the primary account hash to Keychain."""
-        resp = self.client.get_account_numbers()
+        resp = self._call_api("get_account_numbers")
         if resp.status_code != 200:
             raise RuntimeError(f"Failed to fetch account numbers from Schwab API (Status {resp.status_code}): {resp.text}")
         
@@ -42,7 +67,8 @@ class SchwabTrader:
         Returns:
             (available_cash, {ticker: current_dollar_value})
         """
-        resp = self.client.get_account(
+        resp = self._call_api(
+            "get_account",
             self.account_hash,
             fields=schwab.client.Client.Account.Fields.POSITIONS
         )
@@ -50,6 +76,7 @@ class SchwabTrader:
             raise RuntimeError(f"Failed to fetch account info from Schwab API (Status {resp.status_code}): {resp.text}")
 
         account_data = resp.json()
+        print(account_data)
         sec_account = account_data.get("securitiesAccount", {})
         
         current_balances = sec_account.get("currentBalances", {})
@@ -103,7 +130,7 @@ class SchwabTrader:
 
     def get_quotes(self, symbols: List[str]) -> Dict[str, Decimal]:
         """Fetches current ask/last/close price for given ticker symbols."""
-        resp = self.client.get_quotes(symbols)
+        resp = self._call_api("get_quotes", symbols)
         if resp.status_code != 200:
             raise RuntimeError(f"Failed to fetch quotes from Schwab API (Status {resp.status_code}): {resp.text}")
         
@@ -137,7 +164,7 @@ class SchwabTrader:
 
     def place_order(self, order_spec: dict) -> bool:
         """Submits order to Schwab API and provides detailed error messages if rejected."""
-        resp = self.client.place_order(self.account_hash, order_spec)
+        resp = self._call_api("place_order", self.account_hash, order_spec)
         if resp.status_code in (200, 201):
             return True
         else:
@@ -151,3 +178,4 @@ class SchwabTrader:
             except Exception:
                 pass
             raise RuntimeError(f"Order placement failed (Status {resp.status_code}): {error_details}")
+

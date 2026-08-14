@@ -108,16 +108,22 @@ def handle_rebalance(args):
     trader = SchwabTrader(client)
 
     summary = trader.get_account_summary()
-    cash_available = summary["settled_cash"]
+
+    settled_cash = summary["settled_cash"]
     ledger_cash = summary["ledger_cash"]
     current_positions = summary["target_holdings"]
 
-    print(f"\n[INFO] Settled Cash Available for Trading: ${cash_available:,.2f}  (Ledger cashBalance: ${ledger_cash:,.2f})")
+    if getattr(args, "settled_only", False):
+        cash_available = settled_cash
+        print(f"\n[INFO] Settled-Only Mode active: Using Settled Cash (${cash_available:,.2f})  (Ledger cashBalance: ${ledger_cash:,.2f})")
+    else:
+        cash_available = ledger_cash
+        print(f"\n[INFO] Cash Available for Rebalancing (cashBalance): ${cash_available:,.2f}  (Settled Cash: ${settled_cash:,.2f})")
+        if settled_cash < cash_available:
+            print(f"       💡 Note: Using total cashBalance (${cash_available:,.2f}). If Schwab's backend has not finished clearing these funds, orders may be rejected by Schwab API.")
 
     if cash_available < config.MIN_CASH_THRESHOLD:
-        print(f"[SKIP] Settled available cash (${cash_available:,.2f}) is below minimum threshold (${config.MIN_CASH_THRESHOLD:,.2f}).")
-        if ledger_cash > Decimal("0.00"):
-            print(f"       💡 Note: Your ledger cashBalance is ${ledger_cash:,.2f}, but funds are still clearing/settling on Schwab's API backend.")
+        print(f"[SKIP] Available cash for trading (${cash_available:,.2f}) is below minimum threshold (${config.MIN_CASH_THRESHOLD:,.2f}).")
         return
 
     # Calculate buy-only rebalance allocation
@@ -261,11 +267,25 @@ def handle_rebalance(args):
             orders_placed += 1
         except Exception as e:
             print(f"  [ERROR] Failed to place order for {ticker}: {e}")
+            if settled_cash < cash_available:
+                print(f"          💡 Hint: Schwab API rejected the order. This typically occurs because Schwab's backend server requires ACH funds to fully settle before allowing API orders.")
 
         # 1.0s pause to strictly satisfy Schwab's 1-order-per-second API burst governor
         time.sleep(1.0)
 
     print(f"\n[COMPLETE] Successfully executed {orders_placed} order(s).")
+
+def handle_auth(args):
+    """Force re-authentication / token refresh for Schwab API."""
+    check_vpn_guardrail(args)
+
+    if not keychain_manager.has_credentials():
+        print("[ERROR] Credentials missing in Keychain. Please run 'python main.py setup'.")
+        sys.exit(1)
+
+    print("[INFO] Starting Schwab OAuth re-authentication...")
+    get_schwab_client(force_reauth=True)
+
 
 def main():
     parser = argparse.ArgumentParser(description="Schwab Automated Stock Investor & Buy-Only Rebalancer")
@@ -277,6 +297,10 @@ def main():
     # clear
     subparsers.add_parser("clear", help="Clear Schwab API credentials from macOS Keychain")
 
+    # auth / reauth
+    parser_auth = subparsers.add_parser("auth", aliases=["reauth", "login"], help="Force re-authenticate / refresh Schwab OAuth token")
+    parser_auth.add_argument("--bypass-vpn", action="store_true", help="Bypass default US VPN location security check")
+
     # status
     parser_status = subparsers.add_parser("status", help="Check portfolio holdings and available cash")
     parser_status.add_argument("--bypass-vpn", action="store_true", help="Bypass default US VPN location security check")
@@ -284,6 +308,7 @@ def main():
     # rebalance
     parser_rebalance = subparsers.add_parser("rebalance", help="Run buy-only rebalancer")
     parser_rebalance.add_argument("--dry-run", action="store_true", help="Simulate rebalance without placing orders")
+    parser_rebalance.add_argument("--settled-only", action="store_true", help="Strictly require fully settled cash (settled_cash) instead of total ledger cashBalance")
     parser_rebalance.add_argument("--gtc-limit", action="store_true", help="Place GTC (Good Till Cancel) Limit orders with price cap protection")
     parser_rebalance.add_argument("--price-cap-pct", type=float, default=5.0, help="Price cap percentage limit above current quote price (Default: 5.0%%)")
     parser_rebalance.add_argument("--bypass-vpn", action="store_true", help="Bypass default US VPN location security check")
@@ -294,6 +319,8 @@ def main():
         handle_setup(args)
     elif args.command == "clear":
         handle_clear(args)
+    elif args.command in ("auth", "reauth", "login"):
+        handle_auth(args)
     elif args.command == "status":
         handle_status(args)
     elif args.command == "rebalance":
@@ -303,3 +330,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
