@@ -51,8 +51,13 @@ def get_schwab_client(force_reauth: bool = False):
             "Please run 'python main.py setup' first to store your credentials."
         )
 
-    # Ensure token directory exists
+    # Ensure token directory exists with secure permissions (0700)
     config.TOKEN_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        config.TOKEN_DIR.chmod(0o700)
+    except Exception:
+        pass
+
     token_path = config.TOKEN_PATH
 
     if force_reauth and token_path.exists():
@@ -64,6 +69,10 @@ def get_schwab_client(force_reauth: bool = False):
 
     # Try loading existing token
     if not force_reauth and token_path.exists():
+        try:
+            token_path.chmod(0o600)
+        except Exception:
+            pass
         try:
             client = schwab.auth.client_from_token_file(
                 token_path=str(token_path),
@@ -87,6 +96,13 @@ def get_schwab_client(force_reauth: bool = False):
         callback_url=callback_url,
         token_path=str(token_path)
     )
+
+    if token_path.exists():
+        try:
+            token_path.chmod(0o600)
+        except Exception:
+            pass
+
     print("\n[SUCCESS] Schwab authentication successful! OAuth token saved.")
     return client
 

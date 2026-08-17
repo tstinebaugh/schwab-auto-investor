@@ -25,6 +25,7 @@ class TestCashSelection(unittest.TestCase):
         mock_trader.get_quotes.return_value = {"SCHB": Decimal("50.00")}
 
         args = MagicMock()
+        args.portfolio = None
         args.settled_only = False
         args.dry_run = True
         args.gtc_limit = False
@@ -55,6 +56,7 @@ class TestCashSelection(unittest.TestCase):
         }
 
         args = MagicMock()
+        args.portfolio = None
         args.settled_only = True
         args.dry_run = True
         args.gtc_limit = False

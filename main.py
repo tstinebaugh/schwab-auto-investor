@@ -2,6 +2,7 @@ import argparse
 import getpass
 import sys
 from decimal import Decimal
+from pathlib import Path
 from tabulate import tabulate
 
 import config
@@ -56,10 +57,15 @@ def handle_status(args):
         print("[ERROR] Credentials missing in Keychain. Please run 'python main.py setup'.")
         sys.exit(1)
 
+    portfolio_path = getattr(args, "portfolio", None)
+    if not isinstance(portfolio_path, (str, Path)):
+        portfolio_path = None
+    target_portfolio = config.load_portfolio_config(portfolio_path)
+
     client = get_schwab_client()
     trader = SchwabTrader(client)
 
-    summary = trader.get_account_summary()
+    summary = trader.get_account_summary(target_portfolio)
     settled_cash = summary["settled_cash"]
     ledger_cash = summary["ledger_cash"]
     buying_power = summary["buying_power"]
@@ -77,7 +83,7 @@ def handle_status(args):
 
     print("=== TARGET PORTFOLIO HOLDINGS ===")
     table_data = []
-    for ticker, weight in config.TARGET_PORTFOLIO.items():
+    for ticker, weight in target_portfolio.items():
         curr_val = target_positions.get(ticker, Decimal("0.00"))
         curr_pct = (curr_val / total_target_val * 100) if total_target_val > 0 else Decimal("0.0")
         target_pct = weight * 100
@@ -90,7 +96,7 @@ def handle_status(args):
 
     print(tabulate(table_data, headers=["Ticker", "Current Value", "Current %", "Target %"], tablefmt="grid"))
 
-    other_positions = {k: v for k, v in all_positions.items() if k not in config.TARGET_PORTFOLIO}
+    other_positions = {k: v for k, v in all_positions.items() if k not in target_portfolio}
     if other_positions:
         print("\n=== OTHER ACCOUNT HOLDINGS ===")
         other_table = [[k, f"${v:,.2f}"] for k, v in other_positions.items()]
@@ -104,10 +110,15 @@ def handle_rebalance(args):
         print("[ERROR] Credentials missing in Keychain. Please run 'python main.py setup'.")
         sys.exit(1)
 
+    portfolio_path = getattr(args, "portfolio", None)
+    if not isinstance(portfolio_path, (str, Path)):
+        portfolio_path = None
+    target_portfolio = config.load_portfolio_config(portfolio_path)
+
     client = get_schwab_client()
     trader = SchwabTrader(client)
 
-    summary = trader.get_account_summary()
+    summary = trader.get_account_summary(target_portfolio)
 
     settled_cash = summary["settled_cash"]
     ledger_cash = summary["ledger_cash"]
@@ -127,11 +138,11 @@ def handle_rebalance(args):
         return
 
     # Calculate buy-only rebalance allocation
-    rebalance_plan = calculate_buy_only_rebalance(current_positions, cash_available, config.TARGET_PORTFOLIO)
+    rebalance_plan = calculate_buy_only_rebalance(current_positions, cash_available, target_portfolio)
 
     # Fetch real-time quotes to calculate exact share quantities
     print("[INFO] Fetching real-time quotes to compute share quantities...")
-    symbols = list(config.TARGET_PORTFOLIO.keys())
+    symbols = list(target_portfolio.keys())
     quotes = trader.get_quotes(symbols)
 
     # 1. Base whole share calculations
@@ -146,17 +157,17 @@ def handle_rebalance(args):
 
     # 2. Residual Cash Optimizer: Sweep unspent cash into most underweight affordable ETFs
     remaining_cash = cash_available - base_cost
-    total_post_capital = sum(current_positions.get(t, Decimal("0")) for t in config.TARGET_PORTFOLIO) + cash_available
+    total_post_capital = sum(current_positions.get(t, Decimal("0")) for t in target_portfolio) + cash_available
 
     while True:
-        affordable_tickers = [t for t in config.TARGET_PORTFOLIO if quotes.get(t, Decimal("0")) > 0 and quotes[t] <= remaining_cash]
+        affordable_tickers = [t for t in target_portfolio if quotes.get(t, Decimal("0")) > 0 and quotes[t] <= remaining_cash]
         if not affordable_tickers:
             break
 
         # Calculate current projected values with allocated shares
         projected_values = {
             t: current_positions.get(t, Decimal("0")) + (Decimal(str(shares_map[t])) * quotes[t])
-            for t in config.TARGET_PORTFOLIO
+            for t in target_portfolio
         }
         proj_total = sum(projected_values.values())
 
@@ -166,7 +177,7 @@ def handle_rebalance(args):
 
         for t in affordable_tickers:
             curr_w = (projected_values[t] / proj_total) if proj_total > 0 else Decimal("0")
-            shortfall = config.TARGET_PORTFOLIO[t] - curr_w
+            shortfall = target_portfolio[t] - curr_w
             if shortfall > max_shortfall:
                 max_shortfall = shortfall
                 best_ticker = t
@@ -180,7 +191,7 @@ def handle_rebalance(args):
     table_data = []
     total_alloc = Decimal("0.00")
     order_details = {}
-    final_portfolio_val = sum(current_positions.get(t, Decimal("0")) + (Decimal(str(shares_map[t])) * quotes.get(t, Decimal("0"))) for t in config.TARGET_PORTFOLIO)
+    final_portfolio_val = sum(current_positions.get(t, Decimal("0")) + (Decimal(str(shares_map[t])) * quotes.get(t, Decimal("0"))) for t in target_portfolio)
 
     for ticker, plan in rebalance_plan.items():
         allocated = plan["allocated_cash"]
@@ -228,15 +239,15 @@ def handle_rebalance(args):
     market_open, market_reason = config.is_market_open()
     if not market_open and not args.gtc_limit:
         print(f"⚠️ [WARNING] {market_reason}.")
-        print("   Day Market orders placed outside regular trading hours (9:35 AM - 4:00 PM ET) are canceled by Schwab.")
-        print("   💡 TIP: Add '--gtc-limit' to queue GTC Limit orders (+5% price cap) that automatically fill on the next business day!")
+        print("   Day Market orders placed outside regular trading hours (9:30 AM - 4:00 PM ET) are canceled by Schwab.")
+        print(f"   💡 TIP: Add '--gtc-limit' to queue GTC Limit orders (+{args.price_cap_pct:g}% price cap) that automatically fill on the next business day!")
 
     if args.dry_run:
         print("[DRY-RUN MODE] No orders were placed with Schwab API.")
         return
 
     if not market_open and not args.gtc_limit:
-        print(f"\n[NOTICE] {market_reason}. Please run during continuous trading (9:35 AM - 4:00 PM ET) OR add '--gtc-limit'.")
+        print(f"\n[NOTICE] {market_reason}. Please run during continuous trading (9:30 AM - 4:00 PM ET) OR add '--gtc-limit'.")
         return
 
     order_type_desc = f"GTC LIMIT (Max Cap: +{args.price_cap_pct}%)" if args.gtc_limit else "MARKET BUY"
@@ -303,10 +314,12 @@ def main():
 
     # status
     parser_status = subparsers.add_parser("status", help="Check portfolio holdings and available cash")
+    parser_status.add_argument("--portfolio", type=str, default=None, help="Path to custom portfolio targets JSON file (Default: portfolio.json)")
     parser_status.add_argument("--bypass-vpn", action="store_true", help="Bypass default US VPN location security check")
 
     # rebalance
     parser_rebalance = subparsers.add_parser("rebalance", help="Run buy-only rebalancer")
+    parser_rebalance.add_argument("--portfolio", type=str, default=None, help="Path to custom portfolio targets JSON file (Default: portfolio.json)")
     parser_rebalance.add_argument("--dry-run", action="store_true", help="Simulate rebalance without placing orders")
     parser_rebalance.add_argument("--settled-only", action="store_true", help="Strictly require fully settled cash (settled_cash) instead of total ledger cashBalance")
     parser_rebalance.add_argument("--gtc-limit", action="store_true", help="Place GTC (Good Till Cancel) Limit orders with price cap protection")

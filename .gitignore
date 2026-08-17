@@ -10,10 +10,15 @@ __pycache__/
 *$py.class
 .pytest_cache/
 
-# Sensitive OAuth tokens and local logs
+# Sensitive OAuth tokens, keys, and local logs
 token.json
 *.token
 *.log
+.schwab/
+*.pem
+*.key
+*.csv
+*.tsv
 .env
 .env.local
 

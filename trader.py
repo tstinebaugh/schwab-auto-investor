@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Dict, Tuple, List, Optional
+from typing import Dict, Tuple, List, Optional, Any
 import schwab
 import keychain_manager
 import config
@@ -50,23 +50,30 @@ class SchwabTrader:
         # Display available accounts
         print("\n--- SCHWAB ACCOUNTS DISCOVERED ---")
         for idx, acc in enumerate(accounts):
-            acc_num = acc.get("accountNumber")
+            acc_num = acc.get("accountNumber", "")
+            masked_num = f"...{acc_num[-4:]}" if len(acc_num) > 4 else acc_num
             h_val = acc.get("hashValue")
-            print(f"[{idx+1}] Account Number: {acc_num} -> Hash: {h_val}")
+            print(f"[{idx+1}] Account Number: {masked_num} -> Hash: {h_val}")
         
         # Use first account hash by default
         chosen_hash = accounts[0].get("hashValue")
         keychain_manager.set_credential(config.KEY_ACCOUNT_HASH, chosen_hash)
-        print(f"[AUTO-SAVED] Account Hash set to primary account ({accounts[0].get('accountNumber')}) and stored in Keychain!\n")
+        primary_acc_num = accounts[0].get("accountNumber", "")
+        primary_masked = f"...{primary_acc_num[-4:]}" if len(primary_acc_num) > 4 else primary_acc_num
+        print(f"[AUTO-SAVED] Account Hash set to primary account ({primary_masked}) and stored in Keychain!\n")
         return chosen_hash
 
 
-    def get_account_summary(self) -> Tuple[Decimal, Dict[str, Decimal]]:
+    def get_account_summary(self, target_portfolio: Optional[Dict[str, Decimal]] = None) -> Dict[str, Any]:
         """
-        Fetches available cash and current market value of target ETF holdings.
+        Fetches account balances and market values of target ETF holdings.
         Returns:
-            (available_cash, {ticker: current_dollar_value})
+            Dict containing settled_cash, ledger_cash, buying_power, liquidation_value,
+            target_holdings, and all_holdings.
         """
+        if target_portfolio is None:
+            target_portfolio = config.load_portfolio_config()
+
         resp = self._call_api(
             "get_account",
             self.account_hash,
@@ -76,7 +83,6 @@ class SchwabTrader:
             raise RuntimeError(f"Failed to fetch account info from Schwab API (Status {resp.status_code}): {resp.text}")
 
         account_data = resp.json()
-        print(account_data)
         sec_account = account_data.get("securitiesAccount", {})
         
         current_balances = sec_account.get("currentBalances", {})
@@ -103,7 +109,7 @@ class SchwabTrader:
 
         # ETF positions (separate target portfolio vs non-target portfolio)
         positions = sec_account.get("positions", [])
-        target_holdings: Dict[str, Decimal] = {t: Decimal("0.00") for t in config.TARGET_PORTFOLIO}
+        target_holdings: Dict[str, Decimal] = {t: Decimal("0.00") for t in target_portfolio}
         all_holdings: Dict[str, Decimal] = {}
 
         for pos in positions:
