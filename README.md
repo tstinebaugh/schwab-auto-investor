@@ -89,6 +89,7 @@ When creating your application on the [Schwab Developer Portal](https://develope
    - *How login works:* On first run, the script opens a browser for Schwab login. After approving, Schwab redirects your browser to `https://127.0.0.1/?code=...`. The browser page will say *"Can't connect to server"*—this is expected! Simply **copy the entire redirected URL** from your browser address bar and paste it back into the terminal prompt.
 2. **App Key & App Secret**: Obtained from your approved Schwab Developer App dashboard.
 3. **Account Hash**: Obtained from Schwab API or printed during first login status check.
+4. **thinkorswim (TOS) Terms of Service (Crucial Gotcha!)**: You must accept the **thinkorswim (TOS) Terms of Service / Trading Agreements** on the Charles Schwab website. If TOS terms are not accepted on your Schwab account, API trade requests may return success on submission but be immediately auto-canceled on Schwab's backend!
 
 ---
 
@@ -175,3 +176,19 @@ To automatically invest cash on the 1st of every month at 10:00 AM (during marke
    ```cron
    0 10 1 * * cd /path/to/schwab-investor && /path/to/schwab-investor/.venv/bin/python main.py rebalance >> /path/to/schwab-investor/rebalance.log 2>&1
    ```
+
+---
+
+## Troubleshooting & Common Gotchas
+
+### 1. Trades Placed Successfully but Immediately Auto-Canceled
+- **Cause**: Schwab requires accounts trading via API to have accepted the **thinkorswim (TOS) Terms of Service & Electronic Trading Agreements**.
+- **Fix**: Log into the [Schwab Web Portal](https://client.schwab.com), navigate to the **Trade > thinkorswim** tab or open the thinkorswim web platform once, and accept all pending Terms of Service and trading agreement disclosures.
+
+### 2. Orders Rejected Due to Unsettled Funds
+- **Cause**: While Schwab's website/app may extend instant buying power for recent ACH deposits, Schwab's API strict risk rules require funds to fully settle before executing automated API orders.
+- **Fix**: Run rebalance in settled-only mode (`.venv/bin/python main.py rebalance --settled-only`) or wait 2-3 business days for electronic ACH transfers to reach fully settled status (`settled_cash`).
+
+### 3. Orders Canceled Outside Market Hours
+- **Cause**: Standard Day Market buy orders are rejected by the exchange when placed outside regular US continuous trading hours (9:30 AM - 4:00 PM ET).
+- **Fix**: Either run during continuous trading hours or use the `--gtc-limit` flag (`.venv/bin/python main.py rebalance --gtc-limit`) to queue Good-Til-Cancelled limit orders with price cap collars that fill automatically at the next market open.

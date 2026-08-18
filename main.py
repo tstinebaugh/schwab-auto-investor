@@ -279,7 +279,8 @@ def handle_rebalance(args):
         except Exception as e:
             print(f"  [ERROR] Failed to place order for {ticker}: {e}")
             if settled_cash < cash_available:
-                print(f"          💡 Hint: Schwab API rejected the order. This typically occurs because Schwab's backend server requires ACH funds to fully settle before allowing API orders.")
+                print(f"          💡 Hint: Schwab API rejected the order. This typically occurs because Schwab requires ACH funds to fully settle before allowing API orders.")
+            print(f"          💡 Note: If orders are placed but auto-canceled on Schwab, ensure you have accepted the thinkorswim (TOS) Terms of Service on the Schwab website.")
 
         # 1.0s pause to strictly satisfy Schwab's 1-order-per-second API burst governor
         time.sleep(1.0)
