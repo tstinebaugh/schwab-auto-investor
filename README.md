@@ -1,62 +1,143 @@
-# Schwab Automated Stock Investor & Buy-Only Rebalancer
+# Schwab Auto-Investor
 
-An automated monthly investment tool powered by the **Charles Schwab Trader API** and **`schwab-py`**. It invests available account cash according to your target ETF allocation using **buy-only dynamic rebalancing** (never sells existing shares), storing all API keys securely in the **macOS Keychain**.
+[![Tests](https://github.com/tstinebaugh/schwab-auto-investor/actions/workflows/tests.yml/badge.svg)](https://github.com/tstinebaugh/schwab-auto-investor/actions/workflows/tests.yml)
+![Python](https://img.shields.io/badge/python-3.10%2B-blue)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
----
+A command-line tool that invests idle cash in a Charles Schwab brokerage account according to a target ETF allocation. It talks to the official **Schwab Trader API** and uses a **buy-only rebalancing** algorithm: new money goes to whichever holdings are furthest below target, so the portfolio moves back toward its target weights **without ever selling** (and so without creating taxable gains).
 
-## Target Portfolio Allocation & Factor Tilt Rationale
-
-The default portfolio is inspired by **Ben Felix's (PWL Capital / Rational Reminder) evidence-based multi-factor investing framework**, systematically tilting toward independent risk dimensions to capture higher expected risk-adjusted returns over long horizons.
-
-### Default Portfolio Target Weights
-
-| Ticker | Asset Class / Fund Name | Target Weight | Factor Exposures |
-| :--- | :--- | :---: | :--- |
-| **AVLV** | Avantis U.S. Large Cap Value ETF | **45%** | Market, Value, High Profitability |
-| **DFAI** | Dimensional U.S. Core Equity 2 ETF | **25%** | Market, Integrated Multi-Factor (Size, Value, Profitability) |
-| **AVUV** | Avantis U.S. Small Cap Value ETF | **15%** | Size (Small-Cap), Value, High Profitability |
-| **AVDV** | Avantis International Small Cap Value ETF | **10%** | International Developed, Size, Value, Profitability |
-| **DFEM** | Dimensional Emerging Markets Core Equity 2 ETF | **5%** | Emerging Markets Equity, Systematic Factor Tilts |
+I built it to automate the busywork of my monthly investing: one command works out exactly which shares to buy and places the orders. It handles real money, so most of the design is about correctness and safety: exact decimal math, a dry-run mode, typed confirmation before live orders, and secrets kept in the OS keychain rather than in files.
 
 ---
 
-### Investment Philosophy: Why Factor Tilting?
+## Highlights
 
-Traditional passive index investing relies on the **Capital Asset Pricing Model (CAPM)**, assuming that market risk (Beta) is the sole driver of equity returns. However, over five decades of empirical asset pricing research—pioneered by Nobel laureates **Eugene Fama** and **Kenneth French**—has proven that differences in expected returns are explained by multiple independent risk factors:
-
-1. **Size (Small Minus Big - SmB)**: Smaller market-cap companies have historically delivered a return premium over large caps due to unique fundamental risks.
-2. **Value (High Minus Low - HmL)**: Inexpensive companies relative to book value, cash flows, and enterprise value carry higher expected returns than high-multiple growth stocks.
-3. **Profitability (Robust Minus Weak - RmW)**: Companies with high operating profitability systematically outperform those with weak profitability for a given level of valuation.
-4. **Investment (Conservative Minus Aggressive - CmA)**: Firms that invest capital conservatively outperform aggressive capex firms that dilute shareholder equity.
-
-By combining broad market core equity with systematic tilts toward small-cap, value, and robust profitability, investors can achieve **multi-dimensional factor diversification**—improving expected long-term risk-adjusted returns without relying on subjective stock picking or market timing.
-
----
-
-### Why Avantis Investors & Dimensional Fund Advisors (DFA)?
-
-Traditional cap-weighted factor index funds (such as standard Russell 2000 or S&P 600 Value index funds) suffer from significant structural flaws:
-- **Rigid Annual Reconstitution**: Predictable annual index rebalancing leads to predatory front-running by hedge funds and excessive transaction costs.
-- **Unprofitable "Lottery" Stocks**: Naive small-cap indices are loaded with cash-burning, low-profitability companies that historically drag down small-cap performance.
-- **Negative Momentum Drag**: Mechanical index funds often buy falling knives right into downward momentum.
-
-**Avantis and Dimensional solve these issues through dynamic, daily-managed rules-based execution:**
-- **Daily Active Implementation**: Rather than rigid annual turnover, they trade continuously at low turnover, patient execution, and favorable spreads.
-- **Integrated Profitability & Investment Filters**: They eliminate low-profitability/high-reinvestment junk stocks from the investable universe.
-- **Momentum Friction Screens**: They delay buys on stocks with negative short-term momentum and delay sells on stocks with positive short-term momentum.
-
-#### Asset Allocation Breakdown:
-- **AVLV (45%)**: Acts as the cornerstone US equity anchor, providing lower-volatility US large-cap value with high profitability screening.
-- **DFAI (25%)**: Delivers broad US core market coverage with integrated factor tilts (tilted slightly toward smaller, cheaper, and higher-profitability firms across the entire US market).
-- **AVUV (15%)**: The powerhouse factor engine, targeting the intersection of deep small size, low valuation multiples, and robust cash profitability.
-- **AVDV (10%)**: Extends the small-cap value premium to developed international markets (Europe, Japan, Australasia) for global factor diversification.
-- **DFEM (5%)**: Captures emerging market equity risk premiums with systematic multi-factor weighting and country-level risk controls.
+| Area | What it does |
+| :--- | :--- |
+| **Algorithm** | Buy-only rebalancing that sends new cash to the most underweight holdings, then converts dollars to whole shares and puts leftover cash into the next most underweight affordable ETF. |
+| **Correctness** | All money math uses Python `Decimal` (no floating point). Allocations always add up to the exact cash available, to the penny. |
+| **Security** | API keys are stored in the OS keychain (macOS Keychain, Windows Credential Locker, or Linux Secret Service). OAuth tokens are saved with `0600` file permissions. Optional check that the connection comes from a US IP. |
+| **Safety rails** | `--dry-run` mode, a typed `YES` confirmation before live orders, a minimum-cash threshold, a market-hours check, GTC limit orders with a price-cap collar, and an option to use only settled cash. |
+| **Resilience** | When an OAuth token expires or is rejected, the tool re-authenticates and retries the call automatically. Order submissions are spaced out to stay under Schwab's rate limit. When a run has no terminal attached (for example under cron), it fails fast instead of hanging. |
+| **Testing** | 31 unit tests covering the rebalancing math, whole-share allocation, portfolio config validation, auth-error detection and retry, and live-order confirmation, all run in GitHub Actions CI. |
 
 ---
 
-## Customizing Your Target Portfolio (`portfolio.json`)
+## Example
 
-You can easily modify your target allocations or swap tickers by editing **`portfolio.json`** in the project root:
+```text
+$ python main.py rebalance --dry-run
+
+[SECURITY OK] VPN location verified: Chicago, Illinois, US
+[INFO] Cash Available for Rebalancing (cashBalance): $2,000.00  (Settled Cash: $2,000.00)
+[INFO] Fetching real-time quotes to compute share quantities...
+
+=== PROPOSED BUY-ONLY REBALANCE ALLOCATION ===
++----------+---------------+-------------+------------+--------------+---------+----------+------------+----------+
+| Ticker   | Current Val   | Current %   | Target %   | Target ($)   | Price   |   Shares | Est Cost   | Post %   |
++==========+===============+=============+============+==============+=========+==========+============+==========+
+| AVLV     | $10,000.00    | 49.5%       | 45.0%      | $0.00        | $68.10  |        0 | $0.00      | 45.1%    |
+| DFAI     | $4,600.00     | 22.8%       | 25.0%      | $945.27      | $31.20  |       30 | $936.00    | 25.0%    |
+| AVUV     | $2,900.00     | 14.4%       | 15.0%      | $427.86      | $95.40  |        4 | $381.60    | 14.8%    |
+| AVDV     | $1,800.00     | 8.9%        | 10.0%      | $417.91      | $71.90  |        6 | $431.40    | 10.1%    |
+| DFEM     | $900.00       | 4.5%        | 5.0%       | $208.96      | $28.60  |        8 | $228.80    | 5.1%     |
++----------+---------------+-------------+------------+--------------+---------+----------+------------+----------+
+Total Capital to Deploy: $1,977.80
+
+[DRY-RUN MODE] No orders were placed with Schwab API.
+```
+
+*Illustrative output with made-up balances (grid separators between rows trimmed). AVLV is above its target, so it gets no new money; the leftover cash after rounding down to whole shares goes to AVDV and DFEM.*
+
+---
+
+## How it works
+
+```mermaid
+flowchart LR
+    CLI["main.py<br/>(CLI + orchestration)"] --> CFG["config.py<br/>portfolio.json validation,<br/>market hours, location check"]
+    CLI --> AUTH["auth_manager.py<br/>OAuth token lifecycle"]
+    AUTH --> KC["keychain_manager.py<br/>OS keychain secrets"]
+    CLI --> TR["trader.py<br/>Schwab API wrapper<br/>(auto re-auth + retry)"]
+    TR --> API[("Schwab<br/>Trader API")]
+    CLI --> RB["rebalancer.py<br/>pure rebalancing math"]
+```
+
+Each run does the following:
+
+1. **Load and validate** the target allocation from `portfolio.json`. Weights can be given as percentages or decimals, and must sum to 100%.
+2. **Fetch** the account's cash balance and current positions from Schwab.
+3. **Compute dollar allocations** (`calculate_buy_only_rebalance`). The tool works out what each holding *should* be worth once the new cash is invested, finds each holding's shortfall against that target, and splits the cash in proportion to the shortfalls. Overweight holdings get nothing. Rounding is corrected so the total equals the available cash exactly.
+4. **Convert dollars to whole shares** (`allocate_whole_shares`). Each allocation is rounded down to whole shares. The leftover cash is then spent one share at a time on whichever affordable ticker is furthest below target, until no share fits.
+5. **Show the plan**, and place market orders (or GTC limit orders) only after confirmation.
+
+The rebalancing logic in `rebalancer.py` is made of pure functions with no I/O, so it is fully unit-tested without touching the Schwab API.
+
+---
+
+## Quick start
+
+### Prerequisites
+
+- Python 3.10+
+- A Charles Schwab brokerage account
+- An approved app on the [Schwab Developer Portal](https://developer.schwab.com) (gives you an App Key and App Secret). Set its callback URL to `https://127.0.0.1`.
+- **The thinkorswim Terms of Service accepted on your Schwab account.** Without this, API orders can be accepted and then silently auto-canceled. See [Troubleshooting](#troubleshooting).
+
+### Install
+
+```bash
+git clone https://github.com/tstinebaugh/schwab-auto-investor.git
+cd schwab-auto-investor
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Configure credentials
+
+```bash
+python main.py setup
+```
+
+You'll be prompted for your App Key, App Secret, optional account hash (leave it blank and it is detected on first login), and callback URL. These are stored in your OS keychain, never on disk.
+
+The first command that talks to Schwab opens a browser login. After you approve, Schwab redirects to `https://127.0.0.1/?code=...`. The page will fail to load; **that's expected**. Copy the full URL from the address bar and paste it into the terminal.
+
+### Run
+
+```bash
+python main.py status                    # balances, holdings, current vs. target weights
+python main.py rebalance --dry-run       # preview the trades
+python main.py rebalance                 # place market orders (asks you to type YES)
+```
+
+---
+
+## Commands and options
+
+| Command | Description |
+| :--- | :--- |
+| `setup` | Store Schwab API credentials in the OS keychain |
+| `clear` | Remove stored credentials |
+| `auth` (`login`, `reauth`) | Force a fresh OAuth login |
+| `status` | Show balances, target vs. current weights, and other holdings |
+| `rebalance` | Compute and (optionally) execute buy-only rebalancing orders |
+
+| `rebalance` flag | Effect |
+| :--- | :--- |
+| `--dry-run` | Show the plan without placing orders |
+| `--gtc-limit` | Use Good-Til-Canceled limit orders instead of market orders. Use this outside market hours; orders fill at the next open. |
+| `--price-cap-pct N` | Limit price = quote × (1 + N%). Default: 5 |
+| `--settled-only` | Invest only fully settled cash, not the ledger cash balance |
+| `--yes`, `-y` | Skip the confirmation prompt (for scheduled runs) |
+| `--portfolio PATH` | Use a different allocation file (also available on `status`) |
+| `--bypass-vpn` | Skip the US IP-location check (also available on `status` and `auth`) |
+
+---
+
+## Customizing the portfolio
+
+Edit `portfolio.json`, or point `--portfolio` at another file:
 
 ```json
 {
@@ -68,127 +149,89 @@ You can easily modify your target allocations or swap tickers by editing **`port
 }
 ```
 
-### Supported Formats & Validation
-- **Percentages or Decimals**: Specify weights as whole percentages (`45`, `45.0`, `"45%"`) or decimal fractions (`0.45`).
-- **Strict 100% Sum Check**: The script automatically validates that total target weights sum to exactly **100%** (or **1.0**).
-- **Valid Tickers**: Tickers must be valid exchange symbols (e.g. `AVLV`, `BRK.B`, `VTI`).
-- **Custom Profile Flag**: You can maintain multiple portfolio configurations (e.g. for different accounts or goals) and pass them via the `--portfolio` argument:
-  ```bash
-  .venv/bin/python main.py status --portfolio my_custom_portfolio.json
-  .venv/bin/python main.py rebalance --portfolio my_custom_portfolio.json
-  ```
+- Weights can be whole percentages (`45`, `"45%"`) or decimals (`0.45`), and must total 100% (or 1.0).
+- Tickers are normalized to uppercase and validated (`BRK.B` and `BF-B` are accepted).
+- Invalid files are rejected with a clear error before any API call is made.
+
+### About the default allocation
+
+The default portfolio is a factor-tilted global equity mix, inspired by the evidence-based investing approach popularized by Ben Felix (PWL Capital / *Rational Reminder*). It tilts toward the size, value, and profitability premiums documented in Fama-French research, using Avantis and Dimensional funds:
+
+| Ticker | Fund | Weight | Role |
+| :--- | :--- | :---: | :--- |
+| AVLV | Avantis U.S. Large Cap Value ETF | 45% | U.S. large-cap value / profitability |
+| DFAI | Dimensional International Core Equity Market ETF | 25% | Developed international core |
+| AVUV | Avantis U.S. Small Cap Value ETF | 15% | U.S. small-cap value |
+| AVDV | Avantis International Small Cap Value ETF | 10% | International small-cap value |
+| DFEM | Dimensional Emerging Core Equity Market ETF | 5% | Emerging markets |
+
+This is a sample configuration, not a recommendation. See the [disclaimer](#disclaimer).
 
 ---
 
-## TL;DR: Schwab Developer App Setup & Callback URL
+## Why it's run by hand, not on a schedule
 
-When creating your application on the [Schwab Developer Portal](https://developer.schwab.com):
+Schwab's OAuth setup rules out fully unattended investing:
 
-1. **Callback URL / Redirect URI**: Use **`https://127.0.0.1`** (or `https://127.0.0.1:8080/callback`).
-   - *Why HTTPS for local?* Schwab's API enforcement requires `https://` even for local redirect endpoints.
-   - *How login works:* On first run, the script opens a browser for Schwab login. After approving, Schwab redirects your browser to `https://127.0.0.1/?code=...`. The browser page will say *"Can't connect to server"*—this is expected! Simply **copy the entire redirected URL** from your browser address bar and paste it back into the terminal prompt.
-2. **App Key & App Secret**: Obtained from your approved Schwab Developer App dashboard.
-3. **Account Hash**: Obtained from Schwab API or printed during first login status check.
-4. **thinkorswim (TOS) Terms of Service (Crucial Gotcha!)**: You must accept the **thinkorswim (TOS) Terms of Service / Trading Agreements** on the Charles Schwab website. If TOS terms are not accepted on your Schwab account, API trade requests may return success on submission but be immediately auto-canceled on Schwab's backend!
+- **Access tokens** last 30 minutes. The tool renews them automatically using the refresh token.
+- **Refresh tokens** last **7 days** and **can't be extended or renewed through the API**. After 7 days Schwab rejects refresh requests, and the only fix is a new browser login (`python main.py auth`). This is documented in [schwab-py's authentication guide](https://schwab-py.readthedocs.io/en/latest/auth.html).
 
----
+Your App Key and App Secret stay in the keychain and never expire. Only the OAuth token, stored in `~/.schwab/token.json`, does. Because a monthly job always runs more than 7 days after the last login, it would almost always find an expired token. So the intended workflow is to run the tool by hand once a month:
 
-## Keyring / Keychain Setup Directions
-
-### Option A: Interactive Script Command (Recommended)
-Run the built-in setup helper to securely prompt and write credentials to macOS Keychain:
 ```bash
-.venv/bin/python main.py setup
+python main.py rebalance --dry-run   # log in if prompted, review the plan
+python main.py rebalance             # place the orders
 ```
-You will be prompted for:
-- App Key (Client ID)
-- App Secret (Client Secret)
-- Account Hash (**Press Enter to skip**—the script will automatically fetch and save your account hash on your first run!)
-- Callback URL (press Enter for default `https://127.0.0.1`)
 
+If you do want to schedule a run, for example to place orders a few days after an `auth` you ran by hand, the tool supports it safely:
 
-### Option B: Direct macOS Terminal `security` Commands
-If you prefer saving credentials directly via the macOS terminal:
-```bash
-security add-generic-password -a "$USER" -s "schwab_investor_app_key" -w "YOUR_APP_KEY" -U
-security add-generic-password -a "$USER" -s "schwab_investor_app_secret" -w "YOUR_APP_SECRET" -U
-security add-generic-password -a "$USER" -s "schwab_investor_account_hash" -w "YOUR_ACCOUNT_HASH" -U
-security add-generic-password -a "$USER" -s "schwab_investor_callback_url" -w "https://127.0.0.1" -U
+- `--yes` skips the confirmation prompt. Without a terminal and without `--yes`, the tool refuses to place orders.
+- If the token has expired, the run exits with code `2` and tells you to run `python main.py auth`, instead of hanging while it waits for a browser login.
+- The run exits with a non-zero code if any order fails, so a monitoring wrapper can alert on it.
+
+```cron
+0 10 1 * * cd /path/to/schwab-auto-investor && .venv/bin/python main.py rebalance --yes >> rebalance.log 2>&1
 ```
 
 ---
 
-## Installation & Usage
+## Running the tests
 
-1. **Install Dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+```bash
+python -m unittest discover -s tests
+```
 
-2. **Run Unit Tests**:
-   ```bash
-   python3 -m unittest discover -s tests
-   ```
-
-3. **Check Portfolio Status**:
-   ```bash
-   .venv/bin/python main.py status
-   # Or with a custom portfolio configuration:
-   .venv/bin/python main.py status --portfolio portfolio.json
-   ```
-
-4. **Re-Authenticate / Refresh Schwab OAuth Token**:
-   ```bash
-   .venv/bin/python main.py auth
-   ```
-   *Note: If the script encounters an authentication error or an expired token during any operation (`status`, `rebalance`), it will automatically prompt you to re-authenticate.*
-
-5. **Run Rebalance Simulation (Dry-Run)**:
-   ```bash
-   .venv/bin/python main.py rebalance --dry-run
-   # Or with a custom portfolio configuration:
-   .venv/bin/python main.py rebalance --portfolio portfolio.json --dry-run
-   ```
-
-6. **Execute Live Monthly Investment**:
-   - *During regular market hours (9:30 AM - 4:00 PM ET)*:
-     ```bash
-     .venv/bin/python main.py rebalance
-     ```
-   - *Outside market hours (GTC Limit + 3% Price Cap Collar)*:
-     ```bash
-     .venv/bin/python main.py rebalance --gtc-limit --price-cap-pct 3.0
-     ```
-
-*Note: The script verifies your US VPN location automatically on every run. If you ever need to bypass the VPN check, pass `--bypass-vpn`.*
+The tests mock all Schwab API and keychain calls, so they need no credentials or network access.
 
 ---
 
-## Monthly Automation (macOS Cron)
+## Troubleshooting
 
-To automatically invest cash on the 1st of every month at 10:00 AM (during market hours):
+**Orders are accepted, then immediately auto-canceled.**
+Schwab requires the thinkorswim Terms of Service and electronic trading agreements to be accepted before it executes API orders. Log in at [client.schwab.com](https://client.schwab.com), open **Trade → thinkorswim** (or launch thinkorswim web once), and accept any pending agreements.
 
-1. Open your crontab editor:
-   ```bash
-   crontab -e
-   ```
-2. Add the following line (update path to your python environment and project directory):
-   ```cron
-   0 10 1 * * cd /path/to/schwab-investor && /path/to/schwab-investor/.venv/bin/python main.py rebalance >> /path/to/schwab-investor/rebalance.log 2>&1
-   ```
+**Orders are rejected because of unsettled funds.**
+The Schwab website may give instant buying power for recent ACH deposits, but the API can reject orders until the funds settle (usually 1–3 business days). Wait, or use `--settled-only`.
+
+**Orders are canceled outside market hours.**
+Market orders placed outside regular trading hours (9:30 AM–4:00 PM ET) are canceled. Run during market hours, or use `--gtc-limit`.
 
 ---
 
-## Troubleshooting & Common Gotchas
+## Limitations
 
-### 1. Trades Placed Successfully but Immediately Auto-Canceled
-- **Cause**: Schwab requires accounts trading via API to have accepted the **thinkorswim (TOS) Terms of Service & Electronic Trading Agreements**.
-- **Fix**: Log into the [Schwab Web Portal](https://client.schwab.com), navigate to the **Trade > thinkorswim** tab or open the thinkorswim web platform once, and accept all pending Terms of Service and trading agreement disclosures.
+- Places orders in whole shares only (no fractional shares).
+- The market-hours check covers weekends and regular trading hours, but not exchange holidays or early closes.
+- Uses the first brokerage account on the login unless an account hash is set with `setup`.
+- Not fully unattended: Schwab requires a browser login at least every 7 days ([details](#why-its-run-by-hand-not-on-a-schedule)).
+- Share counts are budgeted against the last quote. A market order can fill slightly higher if the price moves before execution.
 
-### 2. Orders Rejected Due to Unsettled Funds
-- **Cause**: While Schwab's website/app may extend instant buying power for recent ACH deposits, Schwab's API strict risk rules require funds to fully settle before executing automated API orders.
-- **Fix**: Run rebalance in settled-only mode (`.venv/bin/python main.py rebalance --settled-only`) or wait 2-3 business days for electronic ACH transfers to reach fully settled status (`settled_cash`).
+---
 
-### 3. Orders Canceled Outside Market Hours
-- **Cause**: Standard Day Market buy orders are rejected by the exchange when placed outside regular US continuous trading hours (9:30 AM - 4:00 PM ET).
-- **Fix**: Either run during continuous trading hours or use the `--gtc-limit` flag (`.venv/bin/python main.py rebalance --gtc-limit`) to queue Good-Til-Cancelled limit orders with price cap collars that fill automatically at the next market open.
+## Disclaimer
+
+This project is for educational and personal use. It is **not financial advice**, and the sample portfolio is not a recommendation. It places real orders in a real brokerage account. Review the code, use `--dry-run`, and use it at your own risk. The author is not affiliated with Charles Schwab, Avantis Investors, or Dimensional Fund Advisors.
+
+## License
+
+[MIT](LICENSE)
