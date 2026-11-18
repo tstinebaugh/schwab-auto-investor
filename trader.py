@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Dict, Tuple, List, Optional, Any
+from typing import Any, Dict, List, Optional
 import schwab
 import keychain_manager
 import config
@@ -52,15 +52,14 @@ class SchwabTrader:
         for idx, acc in enumerate(accounts):
             acc_num = acc.get("accountNumber", "")
             masked_num = f"...{acc_num[-4:]}" if len(acc_num) > 4 else acc_num
-            h_val = acc.get("hashValue")
-            print(f"[{idx+1}] Account Number: {masked_num} -> Hash: {h_val}")
+            print(f"[{idx+1}] Account Number: {masked_num}")
         
         # Use first account hash by default
         chosen_hash = accounts[0].get("hashValue")
         keychain_manager.set_credential(config.KEY_ACCOUNT_HASH, chosen_hash)
         primary_acc_num = accounts[0].get("accountNumber", "")
         primary_masked = f"...{primary_acc_num[-4:]}" if len(primary_acc_num) > 4 else primary_acc_num
-        print(f"[AUTO-SAVED] Account Hash set to primary account ({primary_masked}) and stored in Keychain!\n")
+        print(f"[AUTO-SAVED] Account Hash set to primary account ({primary_masked}) and stored in the OS keychain!\n")
         return chosen_hash
 
 

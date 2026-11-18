@@ -1,6 +1,5 @@
-import os
 import sys
-from pathlib import Path
+
 import httpx
 import schwab
 import keychain_manager
@@ -10,6 +9,10 @@ try:
     from authlib.oauth2.rfc6749.errors import OAuth2Error
 except ImportError:
     OAuth2Error = Exception
+
+
+class InteractiveAuthRequired(RuntimeError):
+    """Raised when a fresh OAuth login is needed but no terminal is attached to complete it."""
 
 
 def is_auth_error(exc: Exception) -> bool:
@@ -83,7 +86,14 @@ def get_schwab_client(force_reauth: bool = False):
         except Exception as e:
             print(f"Token file load failed or token expired ({e}). Starting re-authentication flow...")
 
-    # Manual authorization flow
+    # Manual authorization flow needs a human to paste the redirect URL.
+    # Fail fast instead of hanging when run from cron/launchd.
+    if not sys.stdin.isatty():
+        raise InteractiveAuthRequired(
+            "Schwab OAuth login is required but no interactive terminal is attached. "
+            "Run 'python main.py auth' manually, then re-run this command."
+        )
+
     print("\n--- Schwab API OAuth Authentication / Token Refresh ---")
     print("1. A browser window or URL will open for Schwab login.")
     print("2. Log in and approve access for your application.")

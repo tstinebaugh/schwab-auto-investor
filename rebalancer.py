@@ -110,3 +110,54 @@ def calculate_buy_only_rebalance(
         }
 
     return results
+
+
+def allocate_whole_shares(
+    rebalance_plan: Dict[str, RebalanceResult],
+    current_positions: Dict[str, Decimal],
+    available_cash: Decimal,
+    quotes: Dict[str, Decimal],
+    target_weights: Dict[str, Decimal],
+) -> Dict[str, int]:
+    """
+    Converts dollar allocations into whole-share quantities.
+
+    1. Buys as many whole shares as each ticker's dollar allocation affords.
+    2. Sweeps the leftover cash one share at a time into whichever affordable
+       ticker is furthest below its target weight, until no share fits.
+
+    Tickers with a missing or non-positive quote receive zero shares.
+    """
+    shares: Dict[str, int] = {}
+    spent = Decimal("0")
+    for ticker, plan in rebalance_plan.items():
+        price = quotes.get(ticker, Decimal("0"))
+        qty = int(plan["allocated_cash"] // price) if price > 0 else 0
+        shares[ticker] = qty
+        spent += qty * price
+
+    remaining = available_cash - spent
+
+    while True:
+        affordable = [
+            t for t in target_weights
+            if quotes.get(t, Decimal("0")) > 0 and quotes[t] <= remaining
+        ]
+        if not affordable:
+            break
+
+        projected = {
+            t: current_positions.get(t, Decimal("0")) + shares.get(t, 0) * quotes.get(t, Decimal("0"))
+            for t in target_weights
+        }
+        projected_total = sum(projected.values())
+
+        def weight_gap(t: str) -> Decimal:
+            weight = projected[t] / projected_total if projected_total > 0 else Decimal("0")
+            return target_weights[t] - weight
+
+        best = max(affordable, key=weight_gap)
+        shares[best] = shares.get(best, 0) + 1
+        remaining -= quotes[best]
+
+    return shares

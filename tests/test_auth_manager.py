@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import httpx
-from auth_manager import is_auth_error, get_schwab_client
+from auth_manager import InteractiveAuthRequired, is_auth_error, get_schwab_client
 
 try:
     from authlib.oauth2.rfc6749.errors import OAuth2Error
@@ -37,10 +37,12 @@ class TestAuthManager(unittest.TestCase):
         self.assertTrue(is_auth_error(Exception("Token expired or unauthorized")))
         self.assertFalse(is_auth_error(Exception("Network timeout connecting to server")))
 
+    @patch("auth_manager.sys.stdin")
     @patch("auth_manager.keychain_manager.get_all_credentials")
     @patch("auth_manager.schwab.auth.client_from_manual_flow")
     @patch("auth_manager.config.TOKEN_PATH")
-    def test_get_schwab_client_force_reauth(self, mock_token_path, mock_manual_flow, mock_creds):
+    def test_get_schwab_client_force_reauth(self, mock_token_path, mock_manual_flow, mock_creds, mock_stdin):
+        mock_stdin.isatty.return_value = True
         mock_creds.return_value = {
             "app_key": "test_key",
             "app_secret": "test_secret",
@@ -52,6 +54,20 @@ class TestAuthManager(unittest.TestCase):
 
         mock_token_path.unlink.assert_called_once()
         mock_manual_flow.assert_called_once()
+
+    @patch("auth_manager.sys.stdin")
+    @patch("auth_manager.keychain_manager.get_all_credentials")
+    @patch("auth_manager.schwab.auth.client_from_manual_flow")
+    @patch("auth_manager.config.TOKEN_PATH")
+    def test_get_schwab_client_non_interactive_fails_fast(self, mock_token_path, mock_manual_flow, mock_creds, mock_stdin):
+        """Under cron there is no terminal to paste the OAuth redirect URL into, so don't hang."""
+        mock_stdin.isatty.return_value = False
+        mock_creds.return_value = {"app_key": "k", "app_secret": "s", "callback_url": "https://127.0.0.1"}
+        mock_token_path.exists.return_value = False
+
+        with self.assertRaises(InteractiveAuthRequired):
+            get_schwab_client()
+        mock_manual_flow.assert_not_called()
 
 
 if __name__ == "__main__":
